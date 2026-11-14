@@ -23,6 +23,7 @@ from lgbm_lite import Booster
 HERE = Path(__file__).resolve().parent
 MODEL = "demo_fault_10m"
 SPEEDS = (1, 2, 5, 10, 30)  # recorded minutes per second of replay
+MAX_READINGS = 30  # most readings per channel sent to Nemotron for one block
 endpoint_lock = threading.Lock()
 
 
@@ -70,6 +71,7 @@ class Player:
         self.shown = None
         self.latest = None
         self.sequence = 0
+        self.explanations = {}
 
     def load(self, name):
         if name not in RECORDINGS:
@@ -85,6 +87,7 @@ class Player:
             self.name, self.position, self.playing = name, 0, False
             self.predicted = [None] * len(self.features)
             self.latest = None
+            self.explanations = {}
 
     def describe(self):
         with self.lock:
@@ -131,12 +134,58 @@ class Player:
             if self.features is None or self.position >= len(self.features):
                 self.playing = False
                 return None
+            previous = self.predicted[self.position - 1] if self.position else None
             message = self.score(self.position)
+            # A fault block is a run of consecutive windows with the same fault class.
+            # Replay stops once, on the first window of each block.
+            message["onset"] = message["class"] != 0 and message["class"] != previous
             self.position += 1
-            if message["class"] != 0 or self.position >= len(self.features):
+            if message["onset"] or self.position >= len(self.features):
                 self.playing = False
             message["playing"] = self.playing
             return message
+
+    def block(self, position):
+        """Describe the run of same-class windows around a scored position."""
+        with self.lock:
+            scored = self.features is not None and 0 <= position < len(self.predicted)
+            if not scored or self.predicted[position] is None:
+                return None
+            winner = self.predicted[position]
+            first = last = position
+            while first > 0 and self.predicted[first - 1] == winner:
+                first -= 1
+            while last + 1 < len(self.predicted) and self.predicted[last + 1] == winner:
+                last += 1
+            start = self.features.index[first] - np.timedelta64(LOOKBACK - 1, "m")
+            end = self.features.index[last]
+            readings = self.minute.loc[start:end, CHANNELS]
+            minutes = -(-len(readings) // MAX_READINGS)  # minutes summarized by each reading
+            if minutes > 1:
+                times = readings.index[::minutes]
+                readings = readings.groupby(np.arange(len(readings)) // minutes).median()
+                readings.index = times
+            self.sequence += 1
+            return {
+                "id": self.sequence,
+                "recording": self.name,
+                "first": first,
+                "last": last,
+                "class": winner,
+                # Exactly what is sent to Nemotron for a fault block.
+                "sent": {
+                    "label": LABELS[winner],
+                    "start": start.isoformat(),
+                    "end": (end + np.timedelta64(1, "m")).isoformat(),
+                    "windows_in_block": last - first + 1,
+                    "minutes_per_reading": minutes,
+                    "times": [stamp.strftime("%H:%M") for stamp in readings.index],
+                    "traces": {
+                        channel: [None if np.isnan(value) else round(float(value), 2) for value in readings[channel]]
+                        for channel in CHANNELS
+                    },
+                },
+            }
 
 
 player = Player()
@@ -158,8 +207,18 @@ def publish(message):
     if message:
         show_on_matrix(message["class"])
         ui.send_message("window", message)
-        if message["class"] != 0:
-            threading.Thread(target=explain_fault, args=(message,), daemon=True).start()
+        if message["onset"]:
+            show_block(message["position"], explain=False)
+
+
+def show_block(position, explain):
+    """Send a block's details to the page. Nemotron is asked only when a person clicks a fault block."""
+    block = player.block(position)
+    if block:
+        block["requested"] = explain and block["class"] != 0
+        ui.send_message("block", block)
+        if block["requested"]:
+            threading.Thread(target=explain_fault, args=(block,), daemon=True).start()
 
 
 def send_state(client=None):
@@ -226,10 +285,21 @@ def on_seek(client, data):
     send_state()
 
 
+def on_block(client, data):
+    with player.lock:
+        player.playing = False
+    send_state()
+    show_block(int((data or {}).get("position", -1)), explain=True)
+
+
 def explain_fault(result):
+    known = player.explanations.get((result["recording"], result["first"], result["last"]))
+    if known:
+        ui.send_message("explanation", {"id": result["id"], "text": known})
+        return
     if not endpoint_lock.acquire(blocking=False):
         ui.send_message("explanation", {
-            "id": result["id"], "error": "Nemotron is still processing the previous window. Select this window again to retry.",
+            "id": result["id"], "error": "Nemotron is still processing the previous block. Click this block again to retry.",
         })
         return
     try:
@@ -253,24 +323,29 @@ def request_explanation(result):
             "messages": [
                 {"role": "system", "content": (
                     "Review a refrigeration replay alert from the Sun et al. CO2 test rig. "
-                    "The inputs are ten consecutive one-minute air temperature medians in Fahrenheit "
+                    "The alert is a block: a run of consecutive ten-minute windows that the edge "
+                    "classifier gave the same fault class. The inputs are consecutive air temperature "
+                    "medians in Fahrenheit, each covering minutes_per_reading minutes and listed "
+                    "with its start time, "
                     "for the freezer coil, chilled-case coil and shared gas cooler fan 2. "
                     "For the coils compare return minus supply; for the gas cooler compare outlet "
                     "minus inlet. The expansion valve fault class refers to the freezer valve. "
                     "Give a brief assessment, cite two readings as evidence, and give one operator "
                     "check. Treat the predicted class as a hypothesis."
                 )},
-                {"role": "user", "content": json.dumps({
-                    key: result[key] for key in ("start", "end", "label", "traces")
-                })},
+                {"role": "user", "content": json.dumps(result["sent"])},
             ],
         }
+        sent = result["sent"]
+        print(f"Nemotron request: {sent['label']}, {sent['start']} to {sent['end']}")
         try:
             request = Request(base + "/chat/completions", json.dumps(body).encode(), headers)
-            with urlopen(request, timeout=30) as remote:
+            with urlopen(request, timeout=60) as remote:
                 response["text"] = json.load(remote)["choices"][0]["message"]["content"]
             if not response["text"]:
                 raise ValueError("Empty explanation")
+            if result["recording"] == player.name:
+                player.explanations[(result["recording"], result["first"], result["last"])] = response["text"]
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             response["error"] = "Nemotron could not return an explanation. The edge result is still available."
     ui.send_message("explanation", response)
@@ -282,6 +357,7 @@ ui.on_message("play", on_play)
 ui.on_message("step", on_step)
 ui.on_message("speed", on_speed)
 ui.on_message("seek", on_seek)
+ui.on_message("block", on_block)
 ui.expose_api("GET", "/status", lambda: {key: value for key, value in player.describe().items() if key != "predicted"})
 
 

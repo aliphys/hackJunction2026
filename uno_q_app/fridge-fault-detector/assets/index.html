@@ -60,6 +60,13 @@
   .swatch { width: 14px; height: 3px; border-radius: 2px; }
   #notice { color: var(--alert); min-height: 1.4em; margin: 0 0 8px; font-size: 14px; }
   .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  #block-facts { margin: 0 0 12px; }
+  #sent { margin-top: 12px; font-size: 13px; }
+  #sent summary { cursor: pointer; color: var(--muted); }
+  #sent .scroll { overflow-x: auto; margin-top: 8px; }
+  #sent table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #sent th, #sent td { padding: 3px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  #sent th { color: var(--muted); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -103,21 +110,29 @@
     </section>
   </div>
 
-  <section class="card" id="cloud-review">
-    <h2>Inference path</h2>
-
-    <p id="explanation" role="status" style="white-space:pre-wrap">Select a recording to begin.</p>
-  </section>
-
   <section class="card" style="margin-bottom:14px">
     <h2>Predictions across the recording</h2>
     <canvas id="timeline"></canvas>
     <div class="key" id="legend"></div>
-    <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. Click to jump.</p>
+    <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. A run of stripes with the same class is a block: replay stops once at the start of each fault block. Nemotron is only called when you click a fault block, or click an unscored area to jump there.</p>
+  </section>
+
+  <section class="card" id="cloud-review" style="margin-bottom:14px">
+    <h2 id="review-title">Inference path</h2>
+    <dl class="facts" id="block-facts" hidden>
+      <dt>Edge classification</dt><dd id="block-label">–</dd>
+      <dt>Time span</dt><dd id="block-span">–</dd>
+      <dt>Length</dt><dd id="block-length">–</dd>
+    </dl>
+    <p id="explanation" role="status" style="white-space:pre-wrap;margin:0">Select a recording to begin.</p>
+    <details id="sent" hidden>
+      <summary>Data sent to Nemotron</summary>
+      <div class="scroll" id="sent-data"></div>
+    </details>
   </section>
 
   <section class="card">
-    <h2>Air temperatures in this window (°F, one-minute medians)</h2>
+    <h2 id="chart-title">Air temperatures in this window (°F, one-minute medians)</h2>
     <div class="charts" id="charts"></div>
   </section>
 </main>
@@ -129,6 +144,8 @@ const css = name => getComputedStyle(document.documentElement).getPropertyValue(
 const PANELS = [["Freezer evaporator", 0], ["Chilled-case evaporator", 2], ["Gas cooler", 4]];
 const socket = io();
 let setup = null, state = null, predicted = [], last = null;
+let selected = null;  // the block whose details are shown, if any
+let view = null;      // what the charts show: { start, end, traces }
 
 const clock = text => text.slice(11, 16);
 const say = text => { $("notice").textContent = text || ""; };
@@ -154,7 +171,12 @@ function drawTimeline() {
     context.fillStyle = css("--c" + label);
     context.fillRect(index * stripe, 0, Math.ceil(stripe), height);
   });
-  if (last) {
+  if (selected) {
+    context.strokeStyle = css("--ink");
+    context.lineWidth = 2;
+    const left = selected.first * stripe, wide = Math.max(4, (selected.last - selected.first + 1) * stripe);
+    context.strokeRect(Math.min(left, width - wide) + 1, 1, wide - 2, height - 2);
+  } else if (last) {
     context.fillStyle = css("--ink");
     context.fillRect(Math.min(width - 2, last.position * stripe), 0, 2, height);
   }
@@ -183,8 +205,8 @@ function drawChart(canvas, series) {
     context.fillText(value.toFixed(1), pad.left - 6, y(value));
   }
   context.textBaseline = "alphabetic";
-  context.textAlign = "left"; context.fillText(clock(last.start), pad.left, height - 4);
-  context.textAlign = "right"; context.fillText(clock(last.end), width - pad.right, height - 4);
+  context.textAlign = "left"; context.fillText(clock(view.start), pad.left, height - 4);
+  context.textAlign = "right"; context.fillText(clock(view.end), width - pad.right, height - 4);
   series.forEach((trace, which) => {
     context.strokeStyle = context.fillStyle = css(which ? "--c3" : "--c2");
     context.lineWidth = 2;
@@ -198,25 +220,74 @@ function drawChart(canvas, series) {
     context.stroke();
     trace.forEach((value, index) => {
       if (value === null) return;
-      context.beginPath(); context.arc(x(index), y(value), 2.5, 0, Math.PI * 2); context.fill();
+      context.beginPath(); context.arc(x(index), y(value), trace.length > 15 ? 1.8 : 2.5, 0, Math.PI * 2); context.fill();
     });
   });
 }
 
 function drawCharts() {
-  if (!last || !setup) return;
+  if (!view || !setup) return;
   PANELS.forEach(([, first], index) => {
     const names = setup.channels.slice(first, first + 2);
-    drawChart($("chart" + index), names.map(name => last.traces[name]));
+    drawChart($("chart" + index), names.map(name => view.traces[name]));
   });
+}
+
+function duration(minutes) {
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  return hours ? `${hours} h ${rest} min` : `${rest} min`;
+}
+
+function clearBlock() {
+  selected = null;
+  $("review-title").textContent = "Inference path";
+  $("block-facts").hidden = $("sent").hidden = true;
+}
+
+function showBlock(block) {
+  selected = block;
+  const sent = block.sent, fault = block.class !== 0;
+  view = sent;
+  $("review-title").textContent = fault ? "Fault block" : "Baseline block";
+  $("block-facts").hidden = false;
+  $("block-label").textContent = sent.label;
+  $("block-span").textContent = `${clock(sent.start)} to ${clock(sent.end)}`;
+  const minutes = Math.round((new Date(sent.end) - new Date(sent.start)) / 60000);
+  $("block-length").textContent = `${duration(minutes)}, ${sent.windows_in_block} window${sent.windows_in_block === 1 ? "" : "s"}`;
+  $("explanation").textContent = !fault
+    ? "Early exit on UNO Q: baseline. No cloud request."
+    : block.requested
+      ? "Nemotron is reviewing this block…"
+      : "Replay stopped at the start of a new fault block. Nothing has been sent to Nemotron. Click the block on the timeline to request its analysis, or press Play to continue.";
+  $("sent").hidden = !fault;
+  if (fault) {
+    const names = Object.keys(sent.traces);
+    const cell = value => value === null ? "" : value.toFixed(2);
+    $("sent-data").innerHTML = `<table>
+      <thead><tr><th>Start</th>${names.map(name => `<th>${name}</th>`).join("")}</tr></thead>
+      <tbody>${sent.times.map((time, row) =>
+        `<tr><td>${time}</td>${names.map(name => `<td>${cell(sent.traces[name][row])}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>`;
+    $("sent").querySelector("summary").textContent =
+      `${block.requested ? "Data sent to Nemotron" : "Data that would be sent to Nemotron"}: ${sent.label}, ${sent.times.length} readings per channel, ${sent.minutes_per_reading}-minute medians (°F)`;
+  }
+  $("chart-title").textContent =
+    `Air temperatures across this block (°F, ${sent.minutes_per_reading === 1 ? "one" : sent.minutes_per_reading}-minute medians)`;
+  drawTimeline();
+  drawCharts();
 }
 
 function showWindow(message) {
   last = message;
+  view = message;
+  clearBlock();
+  $("chart-title").textContent = "Air temperatures in this window (°F, one-minute medians)";
   $("edge-title").textContent = "Classified on Arduino UNO Q";
   $("explanation").textContent = message.class === 0
     ? "Early exit on UNO Q: baseline. No cloud request."
-    : "Fault passed the edge gate. Nemotron is reviewing this window…";
+    : message.onset
+      ? "A new fault block passed the edge gate."
+      : "This fault block continues. Click the block on the timeline for its details and Nemotron analysis.";
   const verdict = $("verdict");
   verdict.textContent = message.label;
   verdict.className = message.class === 0 ? "ok" : "alert";
@@ -231,6 +302,7 @@ function showWindow(message) {
 }
 
 function showState(next) {
+  if (state && state.recording !== next.recording) { clearBlock(); view = null; }
   state = next;
   predicted = next.predicted.slice();
   const loaded = Boolean(next.recording);
@@ -285,9 +357,10 @@ socket.on("setup", info => {
   }
 });
 socket.on("explanation", result => {
-  if (last?.id !== result.id) return;
+  if (selected?.id !== result.id) return;
   $("explanation").textContent = result.error || result.text;
 });
+socket.on("block", showBlock);
 socket.on("state", next => { say(""); showState(next); });
 socket.on("window", showWindow);
 socket.on("loading", info => say(`Loading ${info.recording} and computing features on the board…`));
@@ -302,7 +375,9 @@ $("speed").addEventListener("change", event => socket.emit("speed", { speed: Num
 $("timeline").addEventListener("click", event => {
   if (!predicted.length) return;
   const box = event.target.getBoundingClientRect();
-  socket.emit("seek", { position: Math.floor((event.clientX - box.left) / box.width * predicted.length) });
+  const position = Math.min(predicted.length - 1, Math.floor((event.clientX - box.left) / box.width * predicted.length));
+  const scored = predicted[position] !== null && predicted[position] !== undefined;
+  socket.emit(scored ? "block" : "seek", { position });
 });
 window.addEventListener("resize", () => { drawTimeline(); drawCharts(); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawTimeline(); drawCharts(); });
