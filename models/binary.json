@@ -1,0 +1,49 @@
+{
+  "feature_names": [
+    "T-LTcase-Sup median",
+    "T-LTcase-Ret median",
+    "T-GC-Fan2-In median",
+    "T-GC-Fan2-Out median",
+    "T-MTCase-Sup median",
+    "T-MTCase-Ret median",
+    "Freezer air drop median",
+    "Chilled air drop median",
+    "Gas cooler air rise median",
+    "T-LTcase-Sup std",
+    "T-LTcase-Ret std",
+    "T-GC-Fan2-In std",
+    "T-GC-Fan2-Out std",
+    "T-MTCase-Sup std",
+    "T-MTCase-Ret std",
+    "Freezer air drop std",
+    "Chilled air drop std",
+    "Gas cooler air rise std",
+    "T-LTcase-Sup change",
+    "T-LTcase-Ret change",
+    "T-GC-Fan2-In change",
+    "T-GC-Fan2-Out change",
+    "T-MTCase-Sup change",
+    "T-MTCase-Ret change",
+    "Freezer air drop change",
+    "Chilled air drop change",
+    "Gas cooler air rise change"
+  ],
+  "input_channels": [
+    "T-LTcase-Ret",
+    "T-LTcase-Sup",
+    "T-MTCase-Ret",
+    "T-MTCase-Sup",
+    "T-GC-Fan2-In",
+    "T-GC-Fan2-Out"
+  ],
+  "window_minutes": 1,
+  "class_ids": [
+    0,
+    1
+  ],
+  "labels": [
+    "Baseline",
+    "Anomaly"
+  ],
+  "threshold": 0.025069365858099473
+}
