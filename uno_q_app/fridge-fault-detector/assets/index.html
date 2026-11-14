@@ -67,6 +67,11 @@
   #sent table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
   #sent th, #sent td { padding: 3px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
   #sent th { color: var(--muted); font-weight: 600; }
+  .tab-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+  .tab-nav [aria-selected="true"] { background: var(--accent); color: var(--card); border-color: var(--accent); }
+  [hidden] { display: none !important; }
+  .security-results { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 14px; }
+  .security-results p { white-space: pre-line; }
 </style>
 </head>
 <body>
@@ -77,6 +82,14 @@
     <span class="chip down" id="link">Connecting</span>
   </header>
 
+  <nav class="tab-nav" role="tablist" aria-label="Dashboard">
+    <button id="live-tab" role="tab" aria-controls="live-panel" aria-selected="true">Live monitoring</button>
+    <button id="incident-tab" role="tab" aria-controls="incident-panel" aria-selected="false" tabindex="-1">Incident review</button>
+    <button id="security-tab" role="tab" aria-controls="security-panel" aria-selected="false" tabindex="-1">Security demo</button>
+  </nav>
+
+  <p id="notice" role="status"></p>
+  <div id="live-panel" role="tabpanel" aria-labelledby="live-tab">
   <div class="controls">
     <label>Recording
       <select id="recording"><option value="">Choose a recording</option></select>
@@ -87,7 +100,7 @@
       <select id="speed"></select>
     </label>
   </div>
-  <p id="notice" role="status"></p>
+
   <div class="controls">
     <button id="demo-baseline" disabled>Try normal operation</button>
     <button id="demo-fault" disabled>Try freezer door open</button>
@@ -117,8 +130,11 @@
     <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. A run of stripes with the same class is a block: replay stops once at the start of each fault block. Choose an explanation model, then click a scored fault block to request analysis.</p>
   </section>
 
+  </div>
+  <div id="incident-panel" role="tabpanel" aria-labelledby="incident-tab" hidden>
   <section class="card" id="cloud-review" style="margin-bottom:14px">
     <h2 id="review-title">Inference path</h2>
+    <p>Select a scored block on the live timeline to review its readings. Fault blocks can be sent for an explanation.</p>
     <label>Explanation model
       <select id="cloud-provider">
         <option value="nemotron">Nemotron 3.5</option>
@@ -139,7 +155,25 @@
     </details>
   </section>
 
-  <section class="card">
+  </div>
+  <div id="security-panel" role="tabpanel" aria-labelledby="security-tab" hidden>
+    <section class="card">
+      <h2>Simulated unauthorized setpoint change</h2>
+      <p>This tabletop exercise pairs a simulated control event with a recorded freezer-door fault as a proxy for abnormal cooling. The event did not generate the recorded readings.</p>
+      <div class="controls">
+        <button id="security-normal" disabled>Run normal replay</button>
+        <button id="security-fault" disabled>Run attack simulation</button>
+      </div>
+      <p id="security-status" role="status"></p>
+      <div class="security-results">
+        <div><h3>Normal replay</h3><p id="security-normal-result">Waiting for a replay.</p></div>
+        <div><h3>Simulated incident replay</h3><p id="security-fault-result">Waiting for a replay.</p></div>
+      </div>
+      <h3>Operator response</h3>
+      <p>Verify the case temperature, compare recent controller changes with authorized maintenance, and escalate unexpected changes to site security. The edge model flags cooling behavior. Controller logs are needed to attribute a cause.</p>
+    </section>
+  </div>
+  <section class="card" id="shared-charts">
     <h2 id="chart-title">Air temperatures in this window (°F, one-minute medians)</h2>
     <div class="charts" id="charts"></div>
   </section>
@@ -153,6 +187,31 @@ const PANELS = [["Freezer evaporator", 0], ["Chilled-case evaporator", 2], ["Gas
 const socket = io();
 let setup = null, state = null, predicted = [], last = null;
 let selected = null;  // the block whose details are shown, if any
+const tabs = ["live", "incident", "security"];
+let currentTab = "live";
+let securityReplay = null;
+function openTab(name, focus = false) {
+  currentTab = name;
+  for (const tab of tabs) {
+    $(tab + "-panel").hidden = tab !== name;
+    $(tab + "-tab").setAttribute("aria-selected", String(tab === name));
+    $(tab + "-tab").tabIndex = tab === name ? 0 : -1;
+  }
+  $("shared-charts").hidden = name === "security";
+  if (focus) $(name + "-tab").focus();
+  drawTimeline();
+  drawCharts();
+}
+tabs.forEach((name, index) => {
+  const button = $(name + "-tab");
+  button.onclick = () => openTab(name);
+  button.onkeydown = event => {
+    const target = {ArrowLeft: (index + 2) % 3, ArrowRight: (index + 1) % 3, Home: 0, End: 2}[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    openTab(tabs[target], true);
+  };
+});
 let view = null;      // what the charts show: { start, end, traces }
 
 const clock = text => text.slice(11, 16);
@@ -290,6 +349,18 @@ function showBlock(block) {
 }
 
 function showWindow(message) {
+  if (securityReplay && state?.recording === securityReplay.recording) {
+    const kind = securityReplay.kind;
+    const values = message.traces["T-LTcase-Ret"].filter(Number.isFinite);
+    const temperature = values.length ? `${values[0].toFixed(1)} to ${values.at(-1).toFixed(1)} ?F` : "unavailable";
+    $(`security-${kind}-result`).textContent =
+      (kind === "fault" ? "Control event: simulated unauthorized setpoint change.\n" : "Control event: none staged.\n") +
+      `Recorded window: ${clock(message.start)} to ${clock(message.end)}\nFreezer return air: ${temperature}\n` +
+      `UNO Q: ${message.label} (${message.inference_ms.toFixed(2)} ms)\n` +
+      (message.class === 0 ? "Baseline: early exit on the board." : `Fault flagged at window end: ${clock(message.end)}.`);
+    $("security-status").textContent = "Edge result received.";
+    securityReplay = null;
+  }
   last = message;
   view = message;
   clearBlock();
@@ -365,6 +436,14 @@ socket.on("setup", info => {
   for (const [id, prefix] of [["demo-baseline", "BaselineTestD"], ["demo-fault", "Fault1_"]]) {
     const entry = info.recordings.find(item => item.id.startsWith(prefix));
     $(id).disabled = !entry;
+    const kind = id === "demo-baseline" ? "normal" : "fault";
+    const securityButton = $("security-" + kind);
+    securityButton.disabled = !entry;
+    securityButton.onclick = () => {
+      securityReplay = {kind, recording: entry.id};
+      $("security-status").textContent = "Waiting for the UNO Q to classify the recording?";
+      socket.emit("select", {recording: entry.id});
+    };
     $(id).onclick = () => socket.emit("select", { recording: entry.id });
   }
 });
@@ -379,7 +458,13 @@ socket.on("block", showBlock);
 socket.on("state", next => { say(""); showState(next); });
 socket.on("window", showWindow);
 socket.on("loading", info => say(`Loading ${info.recording} and computing features on the board…`));
-socket.on("problem", info => say(info.message));
+socket.on("problem", info => {
+  say(info.message);
+  if (securityReplay) {
+    securityReplay = null;
+    $("security-status").textContent = info.message;
+  }
+});
 
 $("recording").addEventListener("change", event => {
   if (event.target.value) socket.emit("select", { recording: event.target.value });
@@ -392,6 +477,7 @@ $("timeline").addEventListener("click", event => {
   const box = event.target.getBoundingClientRect();
   const position = Math.min(predicted.length - 1, Math.floor((event.clientX - box.left) / box.width * predicted.length));
   const scored = predicted[position] !== null && predicted[position] !== undefined;
+  if (scored) openTab("incident");
   socket.emit(scored ? "block" : "seek", { position, provider: $("cloud-provider").value });
 });
 window.addEventListener("resize", () => { drawTimeline(); drawCharts(); });
