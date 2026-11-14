@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 from io import BytesIO
 import json
 import os
@@ -36,15 +36,14 @@ def load_model(name):
     settings = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
     return lgb.Booster(model_file=str(root / f"{name}.txt")), settings
 
-binary, binary_settings = load_model("binary")
-fault, fault_settings = load_model("fault")
-AIR = binary_settings["input_channels"]
-LOOKBACK = binary_settings["window_minutes"]
-if LOOKBACK != 1 or fault_settings["window_minutes"] != 1 or fault_settings["input_channels"] != AIR:
-    raise ValueError("Replay requires matching one-minute models and sensor channels.")
+fault, fault_settings = load_model("demo_fault_10m")
+AIR = fault_settings["input_channels"]
+LOOKBACK = fault_settings["window_minutes"]
+if LOOKBACK != CONTEXT_MINUTES:
+    raise ValueError("The model and Nemotron must use the same interval.")
 
 # The feature calculation matches the training notebooks.
-def make_windows(path):
+def make_windows(path, lookback=LOOKBACK):
     raw = pd.read_csv(path, usecols=["Timestamp", *AIR])
     stamps = pd.to_datetime(raw.pop("Timestamp"), format="mixed", errors="raise")
     raw = raw.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -61,8 +60,17 @@ def make_windows(path):
         (grouped.last() - grouped.first()).add_suffix(" change"),
     ], axis=1)
     features = features.loc[grouped.count().ge(2).all(axis=1)].copy()
+    if lookback > 1:
+        clock = pd.date_range(minute.index.min(), minute.index.max(), freq="min")
+        levels = minute.where(grouped.count().ge(2).all(axis=1), axis=0).reindex(clock)
+        history = levels.rolling(lookback)
+        features = features.join(pd.concat([
+            history.median().add_suffix(" history median"),
+            history.std(ddof=0).add_suffix(" history std"),
+            levels.diff(lookback - 1).add_suffix(" history change"),
+        ], axis=1)).dropna()
     features["End"] = features.index + pd.Timedelta(minutes=1)
-    features["Start"] = features["End"] - pd.Timedelta(minutes=LOOKBACK)
+    features["Start"] = features["End"] - pd.Timedelta(minutes=lookback)
     return minute, features
 
 
@@ -85,18 +93,15 @@ def chart_image(context, alert_time):
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def request_body(position, minute, features, binary_scores, fault_scores):
+def request_body(position, minute, features, fault_scores):
     row = features.iloc[position]
     end = row["End"]
-    # Retrospective replay includes follow-up readings, especially for alerts at startup.
-    start = max(minute.index.min(), end - pd.Timedelta(minutes=CONTEXT_MINUTES))
-    context = minute.loc[(minute.index >= start) &
-                         (minute.index < start + pd.Timedelta(minutes=2 * CONTEXT_MINUTES))]
+    span = pd.Timedelta(minutes=CONTEXT_MINUTES)
+    start = end - span
+    context = minute.reindex(pd.date_range(start, periods=CONTEXT_MINUTES, freq="min"))
     class_position = int(fault_scores[position].argmax())
     status = {
-        "binary_alert": True,
-        "binary_score": float(binary_scores[position]),
-        "binary_threshold": binary_settings["threshold"],
+        "alert": True,
         "fault_model_prediction": fault_settings["labels"][class_position],
         "fault_model_scores": dict(zip(fault_settings["labels"], fault_scores[position].tolist())),
         "alert_time_recorded_clock": end.isoformat(),
@@ -127,12 +132,12 @@ def request_body(position, minute, features, binary_scores, fault_scores):
                 "Read the attached waveform chart together with the exact CSV values. Identify a visible "
                 "pattern by naming the trace and time, then verify it with two numeric readings when "
                 "available. Compare the predicted fault with one plausible alternative. Organize the "
-                "answer as Assessment, Chart evidence, and Next checks. The chart can include readings "
-                "after the alert for retrospective analysis. Identify those as follow-up evidence. "
+                "answer as Assessment, Chart evidence, and Next checks. In the demo all ten "
+                "minutes are the selected sample scored by LightGBM. "
                 "Distinguish classifier scores from "
                 "observed evidence. If the table has only one minute, avoid inferring a trend or fault onset. "
                 "Describe the observed evidence and plausible causes, "
-                "note classifier disagreement and uncertainty, and suggest checks an operator can perform. "
+                "note uncertainty and suggest checks an operator can perform. "
                 "Use the supplied data as evidence and avoid claiming a confirmed diagnosis."
             )},
             {"role": "user", "content": [
@@ -155,35 +160,55 @@ def send_for_analysis(body, opener=urlopen):
         return json.load(response)["choices"][0]["message"]["content"]
 
 
-def analyze_waveform(source, analyze=send_for_analysis):
+def analyze_waveform(source, analyze=send_for_analysis, on_local=None, start_minute=None):
     minute, features = make_windows(source)
+    recording = minute
     if features.empty:
         raise ValueError("The recording has no complete scoring windows.")
-    binary_scores = binary.predict(features[binary_settings["feature_names"]], num_threads=2)
+    if start_minute is not None:
+        start = minute.index.min() + pd.Timedelta(minutes=start_minute)
+        sample = pd.date_range(start, periods=LOOKBACK, freq="min")
+        if sample[-1] not in features.index:
+            raise ValueError("Choose ten consecutive minutes with enough readings in the recording.")
+        minute = minute.loc[sample]
+        features = features.loc[[sample[-1]]]
     fault_scores = fault.predict(features[fault_settings["feature_names"]], num_threads=2)
-    alerts = pd.Series(binary_scores >= binary_settings["threshold"], index=features.index)
+    labels = np.asarray(fault_settings["labels"])[fault_scores.argmax(axis=1)]
+    alerts = pd.Series(labels != "Baseline", index=features.index)
     gaps = alerts.index.to_series().diff().ne(pd.Timedelta(minutes=1))
     onsets = alerts & (~alerts.shift(fill_value=False) | gaps)
 
     chart = minute[AIR].astype(object).where(minute[AIR].notna(), None)
     positions = np.flatnonzero(onsets.to_numpy())
     result = {
-        "minutes": len(features), "flagged": int(alerts.sum()), "onsets": len(positions),
+        "minutes": len(minute), "flagged": int(alerts.sum()), "onsets": len(positions),
         "fault": None, "time": None, "alert_index": None,
         "traces": chart.to_dict(orient="list"),
         "analysis": "No fault alert was detected.",
+        "predictions": [
+            {
+                "time": start.isoformat(),
+                "alert": bool(alert),
+                "fault": fault_settings["labels"][int(scores.argmax())],
+            }
+            for start, alert, scores in zip(features["End"], alerts, fault_scores)
+        ] if start_minute is not None else [],
     }
     if len(positions):
         position = positions[0]
-        body = request_body(position, minute, features, binary_scores, fault_scores)
+        body = request_body(position, recording, features, fault_scores)
         evidence, chart = body["messages"][-1]["content"]
-        status = json.loads(evidence["text"])["status"]
+        payload = json.loads(evidence["text"])
+        status = payload["status"]
         result.update(
             fault=status["fault_model_prediction"],
             time=status["alert_time_recorded_clock"],
             alert_index=int(minute.index.get_loc(features.index[position])),
             evidence_image=chart["image_url"]["url"],
+            evidence_csv=payload["temperature_csv"],
         )
+        if on_local is not None:
+            on_local(result)
         try:
             analysis = analyze(body)
             result["analysis"] = analysis or "The endpoint returned no analysis text."
@@ -194,3 +219,5 @@ def analyze_waveform(source, analyze=send_for_analysis):
         except (ValueError, KeyError, IndexError, TypeError):
             result["analysis"] = "Check the endpoint settings or response format."
     return result
+
+

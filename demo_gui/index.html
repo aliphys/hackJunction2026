@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,32 +12,93 @@ button{background:#176052;color:white;cursor:pointer}button:disabled{opacity:.6}
 svg{width:100%;height:auto;background:#f6f9f9}pre{white-space:pre-wrap;font:inherit;line-height:1.55}
 #evidence{width:100%;height:auto}
 #legend span{display:inline-block;margin:.25rem .75rem .25rem 0}
+main{max-width:1150px;margin:2.5rem auto}
+h1{letter-spacing:-.04em;font-size:clamp(1.8rem,4vw,2.7rem)}
+form{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+.sample-picker{flex-basis:100%;display:grid;gap:.65rem;padding-block:.75rem;border-block:1px solid #d5e0e0}
+.sample-header,.sample-navigation{display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap}
+.sample-header output{font-weight:650;font-variant-numeric:tabular-nums}
+#sample-start{width:100%;margin:0;accent-color:#176052}
+.sample-navigation button{background:white;color:#176052}
+.example-buttons{display:flex;flex-wrap:wrap;gap:.5rem}
+.example-buttons button{background:white;color:#176052}
+#review:not([hidden]){display:grid;grid-template-columns:1.2fr 1fr;gap:1.5rem}
+#verdict{border-left:5px solid #176052;padding-left:.75rem}
+#verdict.alert{border-color:#a6452f}
+summary{cursor:pointer;font-weight:600}
+details{margin-block:1rem}
+#sensor-table{max-height:16rem;overflow:auto;font:12px ui-monospace,monospace}
+@media(max-width:760px){#review:not([hidden]){grid-template-columns:1fr}}
 </style>
 <main>
 <h1>Refrigeration fault demo</h1>
+<section id="examples" hidden>
+<h2>Sample recordings</h2>
+<h3>Baseline examples</h3>
+<div id="baseline-examples" class="example-buttons"></div>
+<h3>Fault examples</h3>
+<div id="fault-examples" class="example-buttons"></div>
+</section>
 <form>
-<label for="waveform">Recorded waveform</label>
+<label for="waveform">Recorded scenario</label>
 <select id="waveform" required></select>
-<button disabled>Run inference</button>
+<div class="sample-picker">
+<div class="sample-header"><label for="sample-start">Ten-minute sample</label><output id="sample-range" for="sample-start">00:00–00:10</output></div>
+<input id="sample-start" type="range" min="0" max="1430" step="10" value="0" aria-describedby="sample-hint">
+<div class="sample-navigation">
+<button id="previous-sample" type="button" disabled>Previous sample</button>
+<span id="sample-hint">Time from recording start</span>
+<button id="next-sample" type="button" disabled>Next sample</button>
+</div>
+</div>
+<button type="submit" disabled>Analyze sample</button>
 </form>
 <p id="status" role="status"></p>
 <section id="results" hidden>
 <h2 id="verdict"></h2>
 <p id="details"></p>
+<ul id="predictions"></ul>
+<div id="review" hidden>
+<div><h3>Waveform around the alert</h3><img id="evidence" alt="Temperatures around the first model alert"></div>
+<div><h3>Nemotron visual analysis</h3><div id="analysis" aria-live="polite"></div></div>
+</div>
+<details id="evidence-panel" hidden>
+<summary>Evidence sent to Nemotron</summary>
+<p>LightGBM and Nemotron use this same ten-minute sample.</p>
+<pre id="sensor-table"></pre>
+</details>
+<details id="full-recording">
+<summary>View sample traces</summary>
 <h3>Recorded temperatures · °F</h3>
 <svg id="chart" viewBox="0 0 880 240" role="img" aria-label="Six one-minute temperature traces"></svg>
 <p id="legend"></p>
-<h3>Nemotron visual analysis</h3>
-<details id="evidence-panel" hidden>
-<summary>View the chart sent with the sensor data</summary>
-<img id="evidence" alt="Temperature traces around the first alert">
+<p id="marker" hidden>Dashed line: first model alert.</p>
 </details>
-<pre id="analysis"></pre>
+<details><summary>Recording details</summary><p id="filename"></p></details>
 </section>
 </main>
 <script>
 const select = document.querySelector('select');
-const button = document.querySelector('button');
+const button = document.querySelector('button[type="submit"]');
+const sample = document.querySelector('#sample-start');
+const previousSample = document.querySelector('#previous-sample');
+const nextSample = document.querySelector('#next-sample');
+function clock(minutes) {
+  return [Math.floor(minutes / 60), minutes % 60].map(value => String(value).padStart(2, '0')).join(':');
+}
+function updateSample() {
+  const start = Number(sample.value);
+  const range = clock(start) + '–' + clock(start + 10);
+  document.querySelector('#sample-range').textContent = range;
+  sample.setAttribute('aria-valuetext', range + ' from recording start');
+  previousSample.disabled = sample.disabled || start <= Number(sample.min);
+  nextSample.disabled = sample.disabled || start >= Number(sample.max);
+}
+sample.addEventListener('input', updateSample);
+previousSample.addEventListener('click', () => { sample.stepDown(); updateSample(); });
+nextSample.addEventListener('click', () => { sample.stepUp(); updateSample(); });
+select.addEventListener('change', () => { sample.value = sample.min; updateSample(); });
+updateSample();
 const status = document.querySelector('#status');
 const results = document.querySelector('#results');
 const colors = ['#176052','#4e48a1','#ab5133','#207481','#8b497b','#846317'];
@@ -48,7 +109,28 @@ async function getJson(url, options) {
   return data;
 }
 getJson('/waveforms').then(names => {
-  for (const name of names) select.add(new Option(name, name));
+  const labels = ['Freezer door left open', 'Ice on freezer evaporator',
+    'Freezer expansion valve failure', 'Chilled-case fan failure',
+    'Gas cooler airflow blockage', 'Chilled-case airflow blockage'];
+  for (const name of names) {
+    const fault = name.match(/^Fault([1-6])_/);
+    const baseline = name.match(/^BaselineTest([A-E])/);
+    select.add(new Option(fault ? labels[Number(fault[1]) - 1] :
+      baseline ? 'Baseline recording ' + baseline[1] : name, name));
+  }
+  for (const name of names) {
+    const baseline = /^BaselineTest[ADE]\.csv$/.test(name);
+    if (!baseline && !/^Fault[1-6]_/.test(name)) continue;
+    const preset = document.createElement('button');
+    preset.type = 'button';
+    preset.textContent = [...select.options].find(option => option.value === name).text;
+    preset.addEventListener('click', () => {
+      select.value = name;
+      select.dispatchEvent(new Event('change'));
+    });
+    document.querySelector(baseline ? '#baseline-examples' : '#fault-examples').append(preset);
+  }
+  document.querySelector('#examples').hidden = !names.length;
   button.disabled = !names.length;
   if (!names.length) status.textContent = 'No recordings found in data/.';
 }).catch(error => { status.textContent = error.message; });
@@ -93,29 +175,93 @@ function draw(traces, alertIndex) {
   }
 }
 
+function showLocal(data) {
+  const verdict = document.querySelector('#verdict');
+  verdict.textContent = data.fault
+    ? 'Alert detected: ' + data.fault
+    : 'Baseline · No alert detected';
+  verdict.classList.toggle('alert', Boolean(data.fault));
+  document.querySelector('#details').textContent =
+    data.minutes + ' minutes analyzed' +
+    (data.time ? ' / Alert at end of sample: ' + data.time.replace('T', ' ') : '');
+  document.querySelector('#filename').textContent = select.value;
+  const predictions = document.querySelector('#predictions');
+  predictions.replaceChildren();
+  for (const prediction of data.predictions) {
+    const item = document.createElement('li');
+    item.textContent = prediction.time.replace('T', ' ') + ' — ' +
+      (prediction.alert ? 'Alert: ' + prediction.fault : 'Baseline');
+    predictions.append(item);
+  }
+  document.querySelector('#review').hidden = !data.fault;
+  document.querySelector('#evidence-panel').hidden = !data.evidence_image;
+  document.querySelector('#sensor-table').textContent = data.evidence_csv || '';
+  document.querySelector('#full-recording').open = !data.fault;
+  document.querySelector('#marker').hidden = !data.fault;
+  const evidence = document.querySelector('#evidence');
+  if (data.evidence_image) evidence.src = data.evidence_image;
+  else evidence.removeAttribute('src');
+  document.querySelector('#analysis').textContent = 'Nemotron is reviewing the waveform...';
+  draw(data.traces, data.alert_index);
+  results.hidden = false;
+  status.textContent = '';
+}
+
+function showAnalysis(text) {
+  const output = document.querySelector('#analysis');
+  output.replaceChildren();
+  for (const block of text.split(/\r?\n/)) {
+    const line = block.trim().replace(/^#+\s*/, '').replaceAll('**', '');
+    if (!line) continue;
+    const node = document.createElement(/^(Assessment|Chart evidence|Next checks):?$/i.test(line) ? 'h4' : 'p');
+    node.textContent = line;
+    output.append(node);
+  }
+}
+
 document.querySelector('form').addEventListener('submit', async event => {
   event.preventDefault();
   button.disabled = select.disabled = true;
+  sample.disabled = true;
+  document.querySelectorAll('.example-buttons button').forEach(preset => { preset.disabled = true; });
+  updateSample();
   results.hidden = true;
-  status.textContent = 'Scoring the recording and requesting analysis if an alert starts…';
+  status.textContent = 'Checking the recording with LightGBM...';
   try {
-    const data = await getJson('/infer?waveform=' + encodeURIComponent(select.value), {method:'POST'});
-    document.querySelector('#verdict').textContent = data.fault ? 'Fault alert · ' + data.fault : 'No fault alert';
-    document.querySelector('#details').textContent =
-      data.minutes + ' scored minutes · ' + data.flagged + ' flagged · ' + data.onsets + ' alert starts' +
-      (data.time ? ' · first alert ' + data.time : '');
-    document.querySelector('#analysis').textContent = data.analysis;
-    document.querySelector('#evidence-panel').hidden = !data.evidence_image;
-    const evidence = document.querySelector('#evidence');
-    if (data.evidence_image) evidence.src = data.evidence_image;
-    else evidence.removeAttribute('src');
-    draw(data.traces, data.alert_index);
-    results.hidden = false;
-    status.textContent = '';
+    const query = new URLSearchParams({waveform: select.value,
+      start: document.querySelector('#sample-start').value});
+    const response = await fetch('/infer?' + query, {method:'POST'});
+    if (!response.ok) throw new Error((await response.json()).error);
+    let buffer = '';
+    let finished = false;
+    for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const update = JSON.parse(line);
+        if (update.stage === 'error') throw new Error(update.error);
+        if (update.stage === 'local') {
+          showLocal(update);
+          finished = !update.fault;
+        }
+        if (update.stage === 'analysis') {
+          showAnalysis(update.analysis);
+          finished = true;
+        }
+      }
+    }
+    if (!finished) throw new Error('The demo stopped before returning a result.');
   } catch (error) {
     status.textContent = error.message;
+    if (!results.hidden) showAnalysis('Analysis could not be completed.');
   } finally {
     button.disabled = select.disabled = false;
+    sample.disabled = false;
+    document.querySelectorAll('.example-buttons button').forEach(preset => { preset.disabled = false; });
+    updateSample();
   }
 });
 </script>
+
+
