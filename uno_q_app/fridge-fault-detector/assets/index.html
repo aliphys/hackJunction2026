@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -66,7 +66,7 @@
 <main>
   <header>
     <h1>Fridge fault detector</h1>
-    <span class="chip">LightGBM on the UNO Q, no cloud</span>
+    <span class="chip">Arduino UNO Q · Edge inference</span>
     <span class="chip down" id="link">Connecting</span>
   </header>
 
@@ -81,10 +81,14 @@
     </label>
   </div>
   <p id="notice" role="status"></p>
+  <div class="controls">
+    <button id="demo-baseline" disabled>Try normal operation</button>
+    <button id="demo-fault" disabled>Try freezer door open</button>
+  </div>
 
   <div class="grid">
     <section class="card">
-      <h2>Prediction for this window</h2>
+      <h2 id="edge-title">Edge diagnosis</h2>
       <div id="verdict">Waiting for a recording</div>
       <dl class="facts">
         <dt>Window</dt><dd id="window">–</dd>
@@ -98,6 +102,12 @@
       <div id="bars"></div>
     </section>
   </div>
+
+  <section class="card" id="cloud-review">
+    <h2>Inference path</h2>
+
+    <p id="explanation" role="status" style="white-space:pre-wrap">Select a recording to begin.</p>
+  </section>
 
   <section class="card" style="margin-bottom:14px">
     <h2>Predictions across the recording</h2>
@@ -203,7 +213,10 @@ function drawCharts() {
 
 function showWindow(message) {
   last = message;
-  predicted[message.position] = message.class;
+  $("edge-title").textContent = "Classified on Arduino UNO Q";
+  $("explanation").textContent = message.class === 0
+    ? "Early exit on UNO Q: baseline. No cloud request."
+    : "Fault passed the edge gate. Nemotron is reviewing this window…";
   const verdict = $("verdict");
   verdict.textContent = message.label;
   verdict.className = message.class === 0 ? "ok" : "alert";
@@ -264,6 +277,17 @@ socket.on("connect", () => {
 });
 socket.on("disconnect", () => { $("link").textContent = "Disconnected"; $("link").className = "chip down"; });
 socket.on("setup", build);
+socket.on("setup", info => {
+  for (const [id, prefix] of [["demo-baseline", "BaselineTestD"], ["demo-fault", "Fault1_"]]) {
+    const entry = info.recordings.find(item => item.id.startsWith(prefix));
+    $(id).disabled = !entry;
+    $(id).onclick = () => socket.emit("select", { recording: entry.id });
+  }
+});
+socket.on("explanation", result => {
+  if (last?.id !== result.id) return;
+  $("explanation").textContent = result.error || result.text;
+});
 socket.on("state", next => { say(""); showState(next); });
 socket.on("window", showWindow);
 socket.on("loading", info => say(`Loading ${info.recording} and computing features on the board…`));

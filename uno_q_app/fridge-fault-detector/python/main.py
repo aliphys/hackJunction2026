@@ -3,12 +3,14 @@
 Replays a recorded day of air-temperature readings minute by minute and scores
 each ten-minute window with the saved LightGBM fault model. Everything runs on
 the board: feature calculation with pandas, tree evaluation with numpy
-(lgbm_lite), the web page, and the LED matrix. No network service is called.
+(lgbm_lite), the web page, and the LED matrix. Explanations are optional.
 """
 import json
+import os
 from pathlib import Path
 import threading
 import time
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -21,6 +23,20 @@ from lgbm_lite import Booster
 HERE = Path(__file__).resolve().parent
 MODEL = "demo_fault_10m"
 SPEEDS = (1, 2, 5, 10, 30)  # recorded minutes per second of replay
+endpoint_lock = threading.Lock()
+
+
+def endpoint_settings():
+    keys = ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY")
+    defaults = {}
+    for directory in HERE.parents:
+        config = directory / ".env"
+        if config.is_file():
+            for line in config.read_text(encoding="utf-8-sig").splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key.strip() in keys:
+                    defaults.setdefault(key.strip(), value.strip().strip("\"'"))
+    return [os.getenv(key, defaults.get(key, "")) for key in keys]
 
 settings = json.loads((HERE / "models" / f"{MODEL}.json").read_text(encoding="utf-8"))
 LABELS = settings["labels"]
@@ -52,6 +68,8 @@ class Player:
         self.speed = 5
         self.predicted = []
         self.shown = None
+        self.latest = None
+        self.sequence = 0
 
     def load(self, name):
         if name not in RECORDINGS:
@@ -66,6 +84,7 @@ class Player:
             self.matrix = self.features[settings["feature_names"]].to_numpy()
             self.name, self.position, self.playing = name, 0, False
             self.predicted = [None] * len(self.features)
+            self.latest = None
 
     def describe(self):
         with self.lock:
@@ -90,7 +109,9 @@ class Player:
         window = self.minute.reindex(
             [end - np.timedelta64(offset, "m") for offset in range(LOOKBACK - 1, -1, -1)]
         )
-        return {
+        self.sequence += 1
+        self.latest = {
+            "id": self.sequence,
             "position": position,
             "start": window.index[0].isoformat(),
             "end": (end + np.timedelta64(1, "m")).isoformat(),
@@ -103,6 +124,7 @@ class Player:
                 for channel in CHANNELS
             },
         }
+        return self.latest
 
     def step(self):
         with self.lock:
@@ -111,7 +133,7 @@ class Player:
                 return None
             message = self.score(self.position)
             self.position += 1
-            if self.position >= len(self.features):
+            if message["class"] != 0 or self.position >= len(self.features):
                 self.playing = False
             message["playing"] = self.playing
             return message
@@ -136,6 +158,8 @@ def publish(message):
     if message:
         show_on_matrix(message["class"])
         ui.send_message("window", message)
+        if message["class"] != 0:
+            threading.Thread(target=explain_fault, args=(message,), daemon=True).start()
 
 
 def send_state(client=None):
@@ -196,9 +220,60 @@ def on_seek(client, data):
         if player.features is None:
             return
         position = int((data or {}).get("position", 0))
+        player.playing = False
         player.position = min(max(position, 0), len(player.features) - 1)
     publish(player.step())
     send_state()
+
+
+def explain_fault(result):
+    if not endpoint_lock.acquire(blocking=False):
+        ui.send_message("explanation", {
+            "id": result["id"], "error": "Nemotron is still processing the previous window. Select this window again to retry.",
+        })
+        return
+    try:
+        request_explanation(result)
+    finally:
+        endpoint_lock.release()
+
+
+def request_explanation(result):
+    response = {"id": result["id"]}
+    base, endpoint_model, key = endpoint_settings()
+    base = base.rstrip("/")
+    if not base.startswith("https://") or not endpoint_model:
+        response["error"] = "Nemotron is not configured on this board."
+    else:
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        body = {
+            "model": endpoint_model,
+            "messages": [
+                {"role": "system", "content": (
+                    "Review a refrigeration replay alert from the Sun et al. CO2 test rig. "
+                    "The inputs are ten consecutive one-minute air temperature medians in Fahrenheit "
+                    "for the freezer coil, chilled-case coil and shared gas cooler fan 2. "
+                    "For the coils compare return minus supply; for the gas cooler compare outlet "
+                    "minus inlet. The expansion valve fault class refers to the freezer valve. "
+                    "Give a brief assessment, cite two readings as evidence, and give one operator "
+                    "check. Treat the predicted class as a hypothesis."
+                )},
+                {"role": "user", "content": json.dumps({
+                    key: result[key] for key in ("start", "end", "label", "traces")
+                })},
+            ],
+        }
+        try:
+            request = Request(base + "/chat/completions", json.dumps(body).encode(), headers)
+            with urlopen(request, timeout=30) as remote:
+                response["text"] = json.load(remote)["choices"][0]["message"]["content"]
+            if not response["text"]:
+                raise ValueError("Empty explanation")
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            response["error"] = "Nemotron could not return an explanation. The edge result is still available."
+    ui.send_message("explanation", response)
 
 
 ui.on_message("hello", on_hello)
