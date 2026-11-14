@@ -10,6 +10,7 @@ section,form{background:white;border:1px solid #d5e0e0;border-radius:12px;paddin
 select,button{font:inherit;padding:.6rem;border-radius:6px;border:1px solid #789092;max-width:100%}
 button{background:#176052;color:white;cursor:pointer}button:disabled{opacity:.6}
 svg{width:100%;height:auto;background:#f6f9f9}pre{white-space:pre-wrap;font:inherit;line-height:1.55}
+#evidence{width:100%;height:auto}
 #legend span{display:inline-block;margin:.25rem .75rem .25rem 0}
 </style>
 <main>
@@ -26,7 +27,11 @@ svg{width:100%;height:auto;background:#f6f9f9}pre{white-space:pre-wrap;font:inhe
 <h3>Recorded temperatures · °F</h3>
 <svg id="chart" viewBox="0 0 880 240" role="img" aria-label="Six one-minute temperature traces"></svg>
 <p id="legend"></p>
-<h3>Verda analysis</h3>
+<h3>Nemotron visual analysis</h3>
+<details id="evidence-panel" hidden>
+<summary>View the chart sent with the sensor data</summary>
+<img id="evidence" alt="Temperature traces around the first alert">
+</details>
 <pre id="analysis"></pre>
 </section>
 </main>
@@ -100,6 +105,10 @@ document.querySelector('form').addEventListener('submit', async event => {
       data.minutes + ' scored minutes · ' + data.flagged + ' flagged · ' + data.onsets + ' alert starts' +
       (data.time ? ' · first alert ' + data.time : '');
     document.querySelector('#analysis').textContent = data.analysis;
+    document.querySelector('#evidence-panel').hidden = !data.evidence_image;
+    const evidence = document.querySelector('#evidence');
+    if (data.evidence_image) evidence.src = data.evidence_image;
+    else evidence.removeAttribute('src');
     draw(data.traces, data.alert_index);
     results.hidden = false;
     status.textContent = '';

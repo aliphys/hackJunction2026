@@ -1,3 +1,5 @@
+import base64
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -5,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import lightgbm as lgb
+from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
 
@@ -63,11 +66,32 @@ def make_windows(path):
     return minute, features
 
 
+def chart_image(context, alert_time):
+    figure = Figure(figsize=(9, 7), layout="constrained")
+    axes = figure.subplots(3, 1, sharex=True)
+    minutes = (context.index - alert_time).total_seconds() / 60
+    for index, (axis, title) in enumerate(zip(
+        axes, ("Freezer evaporator", "Chilled-case evaporator", "Gas cooler")
+    )):
+        for channel in AIR[2 * index:2 * index + 2]:
+            axis.plot(minutes, context[channel], marker=".", label=channel)
+        axis.axvline(0, linestyle="--", color="#963d45", label="First alert")
+        axis.set(title=title, ylabel="°F")
+        axis.grid(alpha=.2)
+        axis.legend(loc="best", fontsize=8)
+    axes[-1].set_xlabel("Minute start relative to first alert (min)")
+    buffer = BytesIO()
+    figure.savefig(buffer, format="png", dpi=130)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def request_body(position, minute, features, binary_scores, fault_scores):
     row = features.iloc[position]
     end = row["End"]
-    context = minute.loc[(minute.index >= end - pd.Timedelta(minutes=CONTEXT_MINUTES)) &
-                         (minute.index < end)]
+    # Retrospective replay includes follow-up readings, especially for alerts at startup.
+    start = max(minute.index.min(), end - pd.Timedelta(minutes=CONTEXT_MINUTES))
+    context = minute.loc[(minute.index >= start) &
+                         (minute.index < start + pd.Timedelta(minutes=2 * CONTEXT_MINUTES))]
     class_position = int(fault_scores[position].argmax())
     status = {
         "binary_alert": True,
@@ -98,13 +122,23 @@ def request_body(position, minute, features, binary_scores, fault_scores):
                 "the reported air rise is outlet minus inlet. All temperatures are in degrees Fahrenheit. "
                 "The six lab scenarios are LT door open, LT evaporator icing, LT expansion valve failure, "
                 "MT evaporator fan failure, gas cooler air path blockage, and MT evaporator air path blockage. "
-                "Interpret the six sensor channels in that context. Distinguish classifier scores from "
+                "The classifier label Expansion valve failure refers specifically to the LT freezer valve. "
+                "If the strongest evidence is on the MT side, explain the mismatch explicitly. "
+                "Read the attached waveform chart together with the exact CSV values. Identify a visible "
+                "pattern by naming the trace and time, then verify it with two numeric readings when "
+                "available. Compare the predicted fault with one plausible alternative. Organize the "
+                "answer as Assessment, Chart evidence, and Next checks. The chart can include readings "
+                "after the alert for retrospective analysis. Identify those as follow-up evidence. "
+                "Distinguish classifier scores from "
                 "observed evidence. If the table has only one minute, avoid inferring a trend or fault onset. "
                 "Describe the observed evidence and plausible causes, "
                 "note classifier disagreement and uncertainty, and suggest checks an operator can perform. "
                 "Use the supplied data as evidence and avoid claiming a confirmed diagnosis."
             )},
-            {"role": "user", "content": json.dumps(payload, allow_nan=False)},
+            {"role": "user", "content": [
+                {"type": "text", "text": json.dumps(payload, allow_nan=False)},
+                {"type": "image_url", "image_url": {"url": chart_image(context, end)}},
+            ]},
         ],
     }
 
@@ -142,11 +176,13 @@ def analyze_waveform(source, analyze=send_for_analysis):
     if len(positions):
         position = positions[0]
         body = request_body(position, minute, features, binary_scores, fault_scores)
-        status = json.loads(body["messages"][-1]["content"])["status"]
+        evidence, chart = body["messages"][-1]["content"]
+        status = json.loads(evidence["text"])["status"]
         result.update(
             fault=status["fault_model_prediction"],
             time=status["alert_time_recorded_clock"],
             alert_index=int(minute.index.get_loc(features.index[position])),
+            evidence_image=chart["image_url"]["url"],
         )
         try:
             analysis = analyze(body)
