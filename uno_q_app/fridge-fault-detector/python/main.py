@@ -24,11 +24,13 @@ HERE = Path(__file__).resolve().parent
 MODEL = "demo_fault_10m"
 SPEEDS = (1, 2, 5, 10, 30)  # recorded minutes per second of replay
 MAX_READINGS = 30  # most readings per channel sent to Nemotron for one block
-endpoint_lock = threading.Lock()
+PROVIDERS = {"nemotron": "OPENAI", "gemini": "AI_STUDIO"}
+endpoint_locks = {provider: threading.Lock() for provider in PROVIDERS}
 
 
-def endpoint_settings():
-    keys = ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY")
+def endpoint_settings(provider):
+    prefix = PROVIDERS[provider]
+    keys = tuple(f"{prefix}_{suffix}" for suffix in ("BASE_URL", "MODEL", "API_KEY"))
     defaults = {}
     for directory in HERE.parents:
         config = directory / ".env"
@@ -68,6 +70,7 @@ class Player:
         self.playing = False
         self.speed = 5
         self.predicted = []
+        self.timings = {}
         self.shown = None
         self.latest = None
         self.sequence = 0
@@ -86,6 +89,7 @@ class Player:
             self.matrix = self.features[settings["feature_names"]].to_numpy()
             self.name, self.position, self.playing = name, 0, False
             self.predicted = [None] * len(self.features)
+            self.timings.clear()
             self.latest = None
             self.explanations = {}
 
@@ -108,6 +112,7 @@ class Player:
         elapsed = (time.perf_counter() - started) * 1000
         winner = int(scores.argmax())
         self.predicted[position] = winner
+        self.timings[position] = elapsed
         end = self.features.index[position]
         window = self.minute.reindex(
             [end - np.timedelta64(offset, "m") for offset in range(LOOKBACK - 1, -1, -1)]
@@ -173,6 +178,7 @@ class Player:
                 "last": last,
                 "class": winner,
                 # Exactly what is sent to Nemotron for a fault block.
+                "edge_ms": round(float(np.median([self.timings[i] for i in range(first, last + 1)])), 2),
                 "sent": {
                     "label": LABELS[winner],
                     "start": start.isoformat(),
@@ -211,14 +217,15 @@ def publish(message):
             show_block(message["position"], explain=False)
 
 
-def show_block(position, explain):
-    """Send a block's details to the page. Nemotron is asked only when a person clicks a fault block."""
+def show_block(position, explain, provider="nemotron"):
+    """Send a block's details to the page. Request the selected provider when a person clicks a fault block."""
     block = player.block(position)
     if block:
+        block["provider"] = provider
         block["requested"] = explain and block["class"] != 0
         ui.send_message("block", block)
         if block["requested"]:
-            threading.Thread(target=explain_fault, args=(block,), daemon=True).start()
+            threading.Thread(target=explain_with_provider, args=(block, provider), daemon=True).start()
 
 
 def send_state(client=None):
@@ -289,31 +296,71 @@ def on_block(client, data):
     with player.lock:
         player.playing = False
     send_state()
-    show_block(int((data or {}).get("position", -1)), explain=True)
-
-
-def explain_fault(result):
-    known = player.explanations.get((result["recording"], result["first"], result["last"]))
-    if known:
-        ui.send_message("explanation", {"id": result["id"], "text": known})
+    provider = (data or {}).get("provider", "nemotron")
+    if provider not in PROVIDERS:
+        ui.send_message("problem", {"message": "Choose a supported explanation model."}, client)
         return
+    show_block(int((data or {}).get("position", -1)), explain=True, provider=provider)
+
+
+def explain_with_provider(result, provider):
+    cache_key = (provider, result["recording"], result["first"], result["last"])
+    known = player.explanations.get(cache_key)
+    if known:
+        ui.send_message("explanation", {"id": result["id"], "provider": provider, **known, "cached": True})
+        return
+    endpoint_lock = endpoint_locks[provider]
     if not endpoint_lock.acquire(blocking=False):
         ui.send_message("explanation", {
-            "id": result["id"], "error": "Nemotron is still processing the previous block. Click this block again to retry.",
+            "id": result["id"], "provider": provider, "error": "This provider is still processing the previous block. Click this block again to retry.",
         })
         return
     try:
-        request_explanation(result)
+        request_explanation(result, provider, cache_key)
     finally:
         endpoint_lock.release()
 
 
-def request_explanation(result):
-    response = {"id": result["id"]}
-    base, endpoint_model, key = endpoint_settings()
+PAPER_FAULTS = {
+    1: ("BaselineTestA", "The LT freezer door was opened for 5%, 10%, or 15% of the test time."),
+    2: ("BaselineTestB", "The researchers changed defrost timing to build mild, moderate, or severe ice on the LT evaporator."),
+    3: ("BaselineTestC", "The LT freezer evaporator expansion valve was manually moved to partially or fully closed positions."),
+    4: ("BaselineTestD", "The researchers sequentially disabled three of four MT chilled-case evaporator fans to test 25%, 50%, and 75% fan loss."),
+    5: ("BaselineTestE", "The researchers obstructed the shared gas cooler inlet air path at 25%, 50%, and 75% blockage."),
+    6: ("BaselineTestA", "The researchers obstructed the MT evaporator return-air path at 25%, 50%, and 75% blockage."),
+}
+PAPER_ALTERNATIVES = {1: 2, 2: 3, 3: 2, 4: 6, 5: 6, 6: 4}
+
+
+def paper_reference(class_id):
+    return {
+        "source": "Sun et al. (2021), Scientific Data, doi:10.1038/s41597-021-00927-6",
+        "Figure 1": (
+            "The laboratory CO2 system has a low-temperature freezer case (LT), a medium-temperature "
+            "open chilled case (MT), and a shared air-cooled gas cooler. "
+            "T-LTcase-Ret and T-LTcase-Sup measure freezer return and supply air. "
+            "T-MTCase-Ret and T-MTCase-Sup measure chilled-case return and supply air. "
+            "T-GC-Fan2-In and T-GC-Fan2-Out measure air at gas cooler fan 2."
+        ),
+        "Tables 3 and 4": [
+            {"class": LABELS[index], "experimental_method": PAPER_FAULTS[index][1],
+             "matched_baseline_file": PAPER_FAULTS[index][0] + ".csv"}
+            for index in (class_id, PAPER_ALTERNATIVES[class_id])
+        ],
+        "Figures 4 and 5": (
+            "In the reported door-opening example, freezer return air warmed immediately while "
+            "supply air initially stayed near its setpoint. Both air temperatures rose during defrost. "
+            "This observation is specific to the reported door test."
+        ),
+    }
+
+
+def request_explanation(result, provider, cache_key):
+    response = {"id": result["id"], "provider": provider}
+    base, endpoint_model, key = endpoint_settings(provider)
     base = base.rstrip("/")
-    if not base.startswith("https://") or not endpoint_model:
-        response["error"] = "Nemotron is not configured on this board."
+    if not base.startswith("https://") or not endpoint_model or (provider == "gemini" and not key):
+        response["error"] = "This provider is not configured on this board."
     else:
         headers = {"Content-Type": "application/json"}
         if key:
@@ -330,24 +377,38 @@ def request_explanation(result):
                     "for the freezer coil, chilled-case coil and shared gas cooler fan 2. "
                     "For the coils compare return minus supply; for the gas cooler compare outlet "
                     "minus inlet. The expansion valve fault class refers to the freezer valve. "
-                    "Give a brief assessment, cite two readings as evidence, and give one operator "
-                    "check. Treat the predicted class as a hypothesis."
+                    "Use paper_reference and cite the supplied figure or table when stating study facts. "
+                    "First explain how the predicted fault and comparison fault were induced. Then cite "
+                    "two timestamped readings from sensor_block and say which hypothesis, if any, they "
+                    "support. A timestamp denotes the start of an aggregated reading. Avoid inferring "
+                    "fault onset or severity from this block. Matched baseline filenames identify the "
+                    "study comparisons; no baseline readings are supplied. Air temperatures alone cannot "
+                    "establish fan speed, airflow, valve position, pressure, or superheat. Suggest one "
+                    "operator check that would distinguish the hypotheses. For fan failure versus "
+                    "airflow blockage, compare fan operation and return-path obstruction."
                 )},
-                {"role": "user", "content": json.dumps(result["sent"])},
+                {"role": "user", "content": json.dumps({
+                    "paper_reference": paper_reference(result["class"]),
+                    "sensor_block": result["sent"],
+                })},
             ],
         }
         sent = result["sent"]
-        print(f"Nemotron request: {sent['label']}, {sent['start']} to {sent['end']}")
+        print(f"{provider} request: {sent['label']}, {sent['start']} to {sent['end']}")
         try:
             request = Request(base + "/chat/completions", json.dumps(body).encode(), headers)
+            started = time.perf_counter()
             with urlopen(request, timeout=60) as remote:
                 response["text"] = json.load(remote)["choices"][0]["message"]["content"]
             if not response["text"]:
                 raise ValueError("Empty explanation")
+            response["response_ms"] = round((time.perf_counter() - started) * 1000, 2)
             if result["recording"] == player.name:
-                player.explanations[(result["recording"], result["first"], result["last"])] = response["text"]
+                player.explanations[cache_key] = {
+                    "text": response["text"], "response_ms": response["response_ms"],
+                }
         except (OSError, ValueError, KeyError, IndexError, TypeError):
-            response["error"] = "Nemotron could not return an explanation. The edge result is still available."
+            response["error"] = "The provider could not return an explanation. The edge result is still available."
     ui.send_message("explanation", response)
 
 

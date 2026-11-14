@@ -114,19 +114,27 @@
     <h2>Predictions across the recording</h2>
     <canvas id="timeline"></canvas>
     <div class="key" id="legend"></div>
-    <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. A run of stripes with the same class is a block: replay stops once at the start of each fault block. Nemotron is only called when you click a fault block, or click an unscored area to jump there.</p>
+    <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. A run of stripes with the same class is a block: replay stops once at the start of each fault block. Choose an explanation model, then click a scored fault block to request analysis.</p>
   </section>
 
   <section class="card" id="cloud-review" style="margin-bottom:14px">
     <h2 id="review-title">Inference path</h2>
+    <label>Explanation model
+      <select id="cloud-provider">
+        <option value="nemotron">Nemotron 3.5</option>
+        <option value="gemini">Gemini 4 Hydrogen</option>
+      </select>
+    </label>
     <dl class="facts" id="block-facts" hidden>
       <dt>Edge classification</dt><dd id="block-label">–</dd>
       <dt>Time span</dt><dd id="block-span">–</dd>
       <dt>Length</dt><dd id="block-length">–</dd>
+      <dt>UNO Q model time</dt><dd id="block-edge-time">–</dd>
+      <dt id="cloud-time-label">Cloud response time</dt><dd id="block-cloud-time">–</dd>
     </dl>
     <p id="explanation" role="status" style="white-space:pre-wrap;margin:0">Select a recording to begin.</p>
     <details id="sent" hidden>
-      <summary>Data sent to Nemotron</summary>
+      <summary>Data sent for cloud analysis</summary>
       <div class="scroll" id="sent-data"></div>
     </details>
   </section>
@@ -248,9 +256,13 @@ function showBlock(block) {
   selected = block;
   const sent = block.sent, fault = block.class !== 0;
   view = sent;
+  const providerName = block.provider === "gemini" ? "Gemini 4 Hydrogen" : "Nemotron 3.5";
+  $("cloud-time-label").textContent = providerName + " response time";
   $("review-title").textContent = fault ? "Fault block" : "Baseline block";
   $("block-facts").hidden = false;
   $("block-label").textContent = sent.label;
+  $("block-edge-time").textContent = `${block.edge_ms.toFixed(2)} ms median per window`;
+  $("block-cloud-time").textContent = !fault ? "Skipped (early exit)" : block.requested ? "Measuring…" : "Not requested";
   $("block-span").textContent = `${clock(sent.start)} to ${clock(sent.end)}`;
   const minutes = Math.round((new Date(sent.end) - new Date(sent.start)) / 60000);
   $("block-length").textContent = `${duration(minutes)}, ${sent.windows_in_block} window${sent.windows_in_block === 1 ? "" : "s"}`;
@@ -258,7 +270,7 @@ function showBlock(block) {
     ? "Early exit on UNO Q: baseline. No cloud request."
     : block.requested
       ? "Nemotron is reviewing this block…"
-      : "Replay stopped at the start of a new fault block. Nothing has been sent to Nemotron. Click the block on the timeline to request its analysis, or press Play to continue.";
+      : "Replay stopped at the start of a new fault block. No explanation has been requested. Click the block on the timeline to request its analysis, or press Play to continue.";
   $("sent").hidden = !fault;
   if (fault) {
     const names = Object.keys(sent.traces);
@@ -269,7 +281,7 @@ function showBlock(block) {
         `<tr><td>${time}</td>${names.map(name => `<td>${cell(sent.traces[name][row])}</td>`).join("")}</tr>`).join("")}</tbody>
     </table>`;
     $("sent").querySelector("summary").textContent =
-      `${block.requested ? "Data sent to Nemotron" : "Data that would be sent to Nemotron"}: ${sent.label}, ${sent.times.length} readings per channel, ${sent.minutes_per_reading}-minute medians (°F)`;
+      `${block.requested ? "Data sent for cloud analysis" : "Data that would be sent for cloud analysis"}: ${sent.label}, ${sent.times.length} readings per channel, ${sent.minutes_per_reading}-minute medians (°F)`;
   }
   $("chart-title").textContent =
     `Air temperatures across this block (°F, ${sent.minutes_per_reading === 1 ? "one" : sent.minutes_per_reading}-minute medians)`;
@@ -287,7 +299,7 @@ function showWindow(message) {
     ? "Early exit on UNO Q: baseline. No cloud request."
     : message.onset
       ? "A new fault block passed the edge gate."
-      : "This fault block continues. Click the block on the timeline for its details and Nemotron analysis.";
+      : "This fault block continues. Click the block on the timeline for its details and cloud analysis.";
   const verdict = $("verdict");
   verdict.textContent = message.label;
   verdict.className = message.class === 0 ? "ok" : "alert";
@@ -359,6 +371,9 @@ socket.on("setup", info => {
 socket.on("explanation", result => {
   if (selected?.id !== result.id) return;
   $("explanation").textContent = result.error || result.text;
+  $("block-cloud-time").textContent = Number.isFinite(result.response_ms)
+    ? `${(result.response_ms / 1000).toFixed(2)} s incl. network${result.cached ? " (original request, cached)" : ""}`
+    : "Unavailable";
 });
 socket.on("block", showBlock);
 socket.on("state", next => { say(""); showState(next); });
@@ -377,7 +392,7 @@ $("timeline").addEventListener("click", event => {
   const box = event.target.getBoundingClientRect();
   const position = Math.min(predicted.length - 1, Math.floor((event.clientX - box.left) / box.width * predicted.length));
   const scored = predicted[position] !== null && predicted[position] !== undefined;
-  socket.emit(scored ? "block" : "seek", { position });
+  socket.emit(scored ? "block" : "seek", { position, provider: $("cloud-provider").value });
 });
 window.addEventListener("resize", () => { drawTimeline(); drawCharts(); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawTimeline(); drawCharts(); });
