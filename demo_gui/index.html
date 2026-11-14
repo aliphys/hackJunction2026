@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refrigeration fault demo</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#f1f5f5;color:#172c31;margin:0}
+main{max-width:950px;margin:4rem auto;padding:0 1rem}
+section,form{background:white;border:1px solid #d5e0e0;border-radius:12px;padding:1.25rem;margin:1rem 0}
+select,button{font:inherit;padding:.6rem;border-radius:6px;border:1px solid #789092;max-width:100%}
+button{background:#176052;color:white;cursor:pointer}button:disabled{opacity:.6}
+svg{width:100%;height:auto;background:#f6f9f9}pre{white-space:pre-wrap;font:inherit;line-height:1.55}
+#legend span{display:inline-block;margin:.25rem .75rem .25rem 0}
+</style>
+<main>
+<h1>Refrigeration fault demo</h1>
+<form>
+<label for="waveform">Recorded waveform</label>
+<select id="waveform" required></select>
+<button disabled>Run inference</button>
+</form>
+<p id="status" role="status"></p>
+<section id="results" hidden>
+<h2 id="verdict"></h2>
+<p id="details"></p>
+<h3>Recorded temperatures · °F</h3>
+<svg id="chart" viewBox="0 0 880 240" role="img" aria-label="Six one-minute temperature traces"></svg>
+<p id="legend"></p>
+<h3>Verda analysis</h3>
+<pre id="analysis"></pre>
+</section>
+</main>
+<script>
+const select = document.querySelector('select');
+const button = document.querySelector('button');
+const status = document.querySelector('#status');
+const results = document.querySelector('#results');
+const colors = ['#176052','#4e48a1','#ab5133','#207481','#8b497b','#846317'];
+async function getJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error);
+  return data;
+}
+getJson('/waveforms').then(names => {
+  for (const name of names) select.add(new Option(name, name));
+  button.disabled = !names.length;
+  if (!names.length) status.textContent = 'No recordings found in data/.';
+}).catch(error => { status.textContent = error.message; });
+
+function draw(traces, alertIndex) {
+  const chart = document.querySelector('#chart');
+  const legend = document.querySelector('#legend');
+  chart.replaceChildren();
+  legend.replaceChildren();
+  const values = Object.values(traces).flat().filter(Number.isFinite);
+  if (!values.length) return;
+  const low = Math.floor(Math.min(...values) / 10) * 10;
+  const high = Math.max(low + 10, Math.ceil(Math.max(...values) / 10) * 10);
+  const count = Object.values(traces)[0].length;
+  const x = i => 48 + 810 * i / Math.max(1, count - 1);
+  const y = v => 220 - 200 * (v - low) / (high - low);
+  function add(tag, attrs, label = '') {
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, val] of Object.entries(attrs)) shape.setAttribute(key, val);
+    shape.textContent = label;
+    chart.append(shape);
+  }
+  for (const val of [low, (low + high) / 2, high]) {
+    add('line', {x1:48,x2:858,y1:y(val),y2:y(val),stroke:'#d5e0e0'});
+    add('text',{x:7,y:y(val)+4,fill:'#172c31'},String(val));
+  }
+  Object.entries(traces).forEach(([name, series], i) => {
+    let path = '', started = false;
+    series.forEach((value, j) => {
+      if (!Number.isFinite(value)) { started = false; return; }
+      path += (started ? 'L' : 'M') + x(j) + ' ' + y(value) + ' ';
+      started = true;
+    });
+    add('path',{d:path,fill:'none',stroke:colors[i],'stroke-width':1.5});
+    const label = document.createElement('span');
+    label.style.color = colors[i];
+    label.textContent = name;
+    legend.append(label);
+  });
+  if (alertIndex !== null) {
+    add('line',{x1:x(alertIndex),x2:x(alertIndex),y1:14,y2:220,stroke:'#912c32','stroke-dasharray':'5 4'});
+  }
+}
+
+document.querySelector('form').addEventListener('submit', async event => {
+  event.preventDefault();
+  button.disabled = select.disabled = true;
+  results.hidden = true;
+  status.textContent = 'Scoring the recording and requesting analysis if an alert starts…';
+  try {
+    const data = await getJson('/infer?waveform=' + encodeURIComponent(select.value), {method:'POST'});
+    document.querySelector('#verdict').textContent = data.fault ? 'Fault alert · ' + data.fault : 'No fault alert';
+    document.querySelector('#details').textContent =
+      data.minutes + ' scored minutes · ' + data.flagged + ' flagged · ' + data.onsets + ' alert starts' +
+      (data.time ? ' · first alert ' + data.time : '');
+    document.querySelector('#analysis').textContent = data.analysis;
+    draw(data.traces, data.alert_index);
+    results.hidden = false;
+    status.textContent = '';
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = select.disabled = false;
+  }
+});
+</script>
