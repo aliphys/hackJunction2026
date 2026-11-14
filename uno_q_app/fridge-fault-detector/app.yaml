@@ -1,0 +1,6 @@
+name: Fridge fault detector
+icon: 🧊
+description: Scores refrigeration air temperatures with a LightGBM fault model, fully on the board.
+
+bricks:
+  - arduino:web_ui

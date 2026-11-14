@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fridge fault detector</title>
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --ink: #17212b; --muted: #5d6b7a; --line: #dbe1e7;
+    --accent: #00788a; --ok: #2e8b57; --alert: #b3372f; --track: #e9edf1;
+    --c0: #8fa3b0; --c1: #d1495b; --c2: #3d7dd8; --c3: #e08a1e; --c4: #8a56c2; --c5: #1f9e89; --c6: #c2478f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10161c; --card: #19222b; --ink: #e8eef3; --muted: #94a3b1; --line: #2b3742;
+      --accent: #4fc3d4; --ok: #5cc48a; --alert: #f0786e; --track: #232e38;
+      --c0: #5f7381; --c1: #ef6f7f; --c2: #6aa3f0; --c3: #f0a94a; --c4: #ab82e0; --c5: #45c4ae; --c6: #e072b1;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 0 0 10px; }
+  .chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .chip.live { color: var(--ok); border-color: var(--ok); }
+  .chip.down { color: var(--alert); border-color: var(--alert); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  select, button { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; min-height: 38px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--card); font-weight: 600; min-width: 92px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  #verdict { font-size: 28px; font-weight: 700; line-height: 1.2; margin: 2px 0 6px; }
+  #verdict.ok { color: var(--ok); } #verdict.alert { color: var(--alert); }
+  .facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; margin: 10px 0 0; color: var(--muted); font-size: 14px; }
+  .facts dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .bar { display: grid; grid-template-columns: minmax(0, 1fr) 52px; gap: 2px 10px; align-items: center; margin-bottom: 7px; font-size: 13px; }
+  .bar .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .bar .name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar .value { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bar .track { grid-column: 1 / -1; height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .bar .fill { height: 100%; width: 0; border-radius: 3px; transition: width .15s; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  canvas { display: block; width: 100%; }
+  #timeline { height: 44px; cursor: pointer; border-radius: 6px; }
+  .charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  @media (max-width: 760px) { .charts { grid-template-columns: minmax(0, 1fr); } }
+  .charts canvas { height: 150px; }
+  .charts h3 { font-size: 13px; margin: 0 0 4px; }
+  .key { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 3px; border-radius: 2px; }
+  #notice { color: var(--alert); min-height: 1.4em; margin: 0 0 8px; font-size: 14px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Fridge fault detector</h1>
+    <span class="chip">LightGBM on the UNO Q, no cloud</span>
+    <span class="chip down" id="link">Connecting</span>
+  </header>
+
+  <div class="controls">
+    <label>Recording
+      <select id="recording"><option value="">Choose a recording</option></select>
+    </label>
+    <button class="primary" id="play" disabled>Play</button>
+    <button id="step" disabled>Next minute</button>
+    <label>Replay speed
+      <select id="speed"></select>
+    </label>
+  </div>
+  <p id="notice" role="status"></p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Prediction for this window</h2>
+      <div id="verdict">Waiting for a recording</div>
+      <dl class="facts">
+        <dt>Window</dt><dd id="window">–</dd>
+        <dt>Recorded scenario</dt><dd id="scenario">–</dd>
+        <dt>Scoring time on board</dt><dd id="latency">–</dd>
+        <dt>Model</dt><dd id="model">–</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Class scores</h2>
+      <div id="bars"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-bottom:14px">
+    <h2>Predictions across the recording</h2>
+    <canvas id="timeline"></canvas>
+    <div class="key" id="legend"></div>
+    <p class="hint">Each stripe is one ten-minute window, scored as the replay reaches it. Click to jump.</p>
+  </section>
+
+  <section class="card">
+    <h2>Air temperatures in this window (°F, one-minute medians)</h2>
+    <div class="charts" id="charts"></div>
+  </section>
+</main>
+
+<script src="libs/socket.io.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const PANELS = [["Freezer evaporator", 0], ["Chilled-case evaporator", 2], ["Gas cooler", 4]];
+const socket = io();
+let setup = null, state = null, predicted = [], last = null;
+
+const clock = text => text.slice(11, 16);
+const say = text => { $("notice").textContent = text || ""; };
+
+function sizeCanvas(canvas) {
+  const ratio = window.devicePixelRatio || 1, box = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(box.width * ratio));
+  canvas.height = Math.max(1, Math.round(box.height * ratio));
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return [context, box.width, box.height];
+}
+
+function drawTimeline() {
+  const [context, width, height] = sizeCanvas($("timeline"));
+  context.fillStyle = css("--track");
+  context.fillRect(0, 0, width, height);
+  const count = predicted.length;
+  if (!count) return;
+  const stripe = width / count;
+  predicted.forEach((label, index) => {
+    if (label === null || label === undefined) return;
+    context.fillStyle = css("--c" + label);
+    context.fillRect(index * stripe, 0, Math.ceil(stripe), height);
+  });
+  if (last) {
+    context.fillStyle = css("--ink");
+    context.fillRect(Math.min(width - 2, last.position * stripe), 0, 2, height);
+  }
+}
+
+function drawChart(canvas, series) {
+  const [context, width, height] = sizeCanvas(canvas);
+  const pad = { left: 38, right: 8, top: 8, bottom: 20 };
+  context.clearRect(0, 0, width, height);
+  const values = series.flat().filter(value => value !== null);
+  if (!values.length) return;
+  let low = Math.min(...values), high = Math.max(...values);
+  if (high - low < 2) { const middle = (high + low) / 2; low = middle - 1; high = middle + 1; }
+  const span = high - low; low -= span * .08; high += span * .08;
+  const steps = series[0].length - 1;
+  const x = index => pad.left + (width - pad.left - pad.right) * index / Math.max(1, steps);
+  const y = value => pad.top + (height - pad.top - pad.bottom) * (1 - (value - low) / (high - low));
+  context.font = "11px system-ui, sans-serif";
+  context.fillStyle = css("--muted");
+  context.strokeStyle = css("--line");
+  context.lineWidth = 1;
+  context.textAlign = "right"; context.textBaseline = "middle";
+  for (let tick = 0; tick <= 2; tick++) {
+    const value = low + (high - low) * tick / 2;
+    context.beginPath(); context.moveTo(pad.left, y(value)); context.lineTo(width - pad.right, y(value)); context.stroke();
+    context.fillText(value.toFixed(1), pad.left - 6, y(value));
+  }
+  context.textBaseline = "alphabetic";
+  context.textAlign = "left"; context.fillText(clock(last.start), pad.left, height - 4);
+  context.textAlign = "right"; context.fillText(clock(last.end), width - pad.right, height - 4);
+  series.forEach((trace, which) => {
+    context.strokeStyle = context.fillStyle = css(which ? "--c3" : "--c2");
+    context.lineWidth = 2;
+    context.beginPath();
+    let open = false;
+    trace.forEach((value, index) => {
+      if (value === null) { open = false; return; }
+      open ? context.lineTo(x(index), y(value)) : context.moveTo(x(index), y(value));
+      open = true;
+    });
+    context.stroke();
+    trace.forEach((value, index) => {
+      if (value === null) return;
+      context.beginPath(); context.arc(x(index), y(value), 2.5, 0, Math.PI * 2); context.fill();
+    });
+  });
+}
+
+function drawCharts() {
+  if (!last || !setup) return;
+  PANELS.forEach(([, first], index) => {
+    const names = setup.channels.slice(first, first + 2);
+    drawChart($("chart" + index), names.map(name => last.traces[name]));
+  });
+}
+
+function showWindow(message) {
+  last = message;
+  predicted[message.position] = message.class;
+  const verdict = $("verdict");
+  verdict.textContent = message.label;
+  verdict.className = message.class === 0 ? "ok" : "alert";
+  $("window").textContent = `${clock(message.start)} to ${clock(message.end)}, window ${message.position + 1} of ${predicted.length}`;
+  $("latency").textContent = `${message.inference_ms.toFixed(1)} ms`;
+  message.scores.forEach((score, index) => {
+    $("fill" + index).style.width = (score * 100).toFixed(1) + "%";
+    $("value" + index).textContent = (score * 100).toFixed(1) + "%";
+  });
+  drawTimeline();
+  drawCharts();
+}
+
+function showState(next) {
+  state = next;
+  predicted = next.predicted.slice();
+  const loaded = Boolean(next.recording);
+  $("recording").value = next.recording || "";
+  $("scenario").textContent = next.scenario || "–";
+  $("play").disabled = $("step").disabled = !loaded;
+  $("play").textContent = next.playing ? "Pause" : (loaded && next.position >= next.windows ? "Replay" : "Play");
+  $("speed").value = String(next.speed);
+  if (!loaded) last = null;
+  drawTimeline();
+}
+
+function build(config) {
+  setup = config;
+  $("model").textContent = `${config.model.trees} trees, ${config.model.features} features, ${config.window_minutes}-minute window`;
+  const menu = $("recording");
+  menu.length = 1;
+  config.recordings.forEach(item => menu.add(new Option(`${item.id} (${item.scenario})`, item.id)));
+  const speed = $("speed");
+  speed.length = 0;
+  config.speeds.forEach(value => speed.add(new Option(`${value} min per second`, value)));
+  $("bars").innerHTML = config.labels.map((label, index) => `
+    <div class="bar">
+      <div class="name"><span class="dot" style="background:var(--c${index})"></span><span>${label}</span></div>
+      <div class="value" id="value${index}">–</div>
+      <div class="track"><div class="fill" id="fill${index}" style="background:var(--c${index})"></div></div>
+    </div>`).join("");
+  $("legend").innerHTML = config.labels.map((label, index) =>
+    `<span><span class="dot" style="background:var(--c${index})"></span>${label}</span>`).join("");
+  $("charts").innerHTML = PANELS.map(([title, first], index) => `
+    <div>
+      <h3>${title}</h3>
+      <canvas id="chart${index}"></canvas>
+      <div class="key">
+        <span><span class="swatch" style="background:var(--c2)"></span>${config.channels[first]}</span>
+        <span><span class="swatch" style="background:var(--c3)"></span>${config.channels[first + 1]}</span>
+      </div>
+    </div>`).join("");
+}
+
+socket.on("connect", () => {
+  $("link").textContent = "Connected to board"; $("link").className = "chip live";
+  socket.emit("hello", {});
+});
+socket.on("disconnect", () => { $("link").textContent = "Disconnected"; $("link").className = "chip down"; });
+socket.on("setup", build);
+socket.on("state", next => { say(""); showState(next); });
+socket.on("window", showWindow);
+socket.on("loading", info => say(`Loading ${info.recording} and computing features on the board…`));
+socket.on("problem", info => say(info.message));
+
+$("recording").addEventListener("change", event => {
+  if (event.target.value) socket.emit("select", { recording: event.target.value });
+});
+$("play").addEventListener("click", () => socket.emit("play", { playing: !(state && state.playing) }));
+$("step").addEventListener("click", () => socket.emit("step", {}));
+$("speed").addEventListener("change", event => socket.emit("speed", { speed: Number(event.target.value) }));
+$("timeline").addEventListener("click", event => {
+  if (!predicted.length) return;
+  const box = event.target.getBoundingClientRect();
+  socket.emit("seek", { position: Math.floor((event.clientX - box.left) / box.width * predicted.length) });
+});
+window.addEventListener("resize", () => { drawTimeline(); drawCharts(); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawTimeline(); drawCharts(); });
+</script>
+</body>
+</html>
