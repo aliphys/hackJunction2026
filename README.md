@@ -1,8 +1,14 @@
-# Fridge Fault Detector
+# The last line of defence for the food supply chain
 
-**Help shops catch refrigeration faults early and protect food stock with AI running on the Arduino UNO Q.**
+In October 2026, a cyberattack pushed temperatures in some French supermarket refrigeration systems to **50°C**. Stores threw away fresh and frozen food, and one grocery chain reported losses in the tens of millions of euros. [Associated Press reporting](https://apnews.com/article/6914ecf1a3285291653e103655f9e4a4)
 
-Built for Arduino’s **Make Europe Green through Edge AI using Arduino** challenge at [Junction 2026](https://hackjunction.app/hackathons/junction-2026). Refrigeration is a local problem with direct consequences for shop operators. When cooling degrades, food can spoil and equipment can run inefficiently. Earlier alerts give staff a chance to investigate, protect stock, and address faults sooner.
+That was a warning. The cold chain that keeps grocery shelves stocked also protects temperature-sensitive medicines, including insulin and vaccines. When cooling fails, the people responsible for the stock need to know while they still have time to act.
+
+**We’re building an independent edge monitor that watches fridges and freezers, detects abnormal cooling, and gives operators evidence to act on.** The Arduino UNO Q runs the classifier locally and shows the result on its LED matrix and dashboard. It can keep classifying without internet access or a working cloud service. The intended deployment keeps the dashboard on the local network, with outbound cloud requests only when an operator requests an explanation.
+
+The Junction prototype replays recorded temperatures in ten-minute windows. It demonstrates the monitoring and incident-review workflow. The security demo uses a recorded refrigeration fault to illustrate how abnormal cooling could be flagged during a simulated incident.
+
+Built for Arduino’s **Make Europe Green through Edge AI using Arduino** challenge at [Junction 2026](https://hackjunction.app/hackathons/junction-2026).
 
 ## How it meets the challenge
 
