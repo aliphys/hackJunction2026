@@ -1,2 +1,7 @@
 /.env
 /uno_q_app/fridge-fault-detector/.env
+
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/

@@ -212,4 +212,4 @@ Commercial CO₂ test rig with a freezer (LT), a chilled case (MT), and a shared
 | EER | Energy efficiency ratio | — | — | — | — | 100.0 | 0/11 |
 | T-LT_BPHX_C02_EXIT [duplicate at column 159] | Temperature at freezer circuit / brazed-plate heat exchanger / CO₂ / EXIT | — | 85.36 | 88.32 | 91.64 | 0.0 | 0/1 |
 
-Open [sensor_data.ipynb](sensor_data.ipynb) for per-run profiles, fault comparisons and plots. Run all cells to regenerate this guide.
+Open [sensor_data.ipynb](../notebooks/sensor_data.ipynb) for per-run profiles, fault comparisons and plots. Run all cells to regenerate this guide.

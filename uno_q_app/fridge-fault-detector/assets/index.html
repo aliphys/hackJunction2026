@@ -315,7 +315,7 @@ function showBlock(block) {
   selected = block;
   const sent = block.sent, fault = block.class !== 0;
   view = sent;
-  const providerName = block.provider === "gemini" ? "Gemini 4 Hydrogen" : "Nemotron 3.5";
+  const providerName = $("cloud-provider").querySelector(`option[value="${block.provider}"]`)?.textContent || "Cloud model";
   $("cloud-time-label").textContent = providerName + " response time";
   $("review-title").textContent = fault ? "Fault block" : "Baseline block";
   $("block-facts").hidden = false;
